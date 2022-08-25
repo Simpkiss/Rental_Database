@@ -1,0 +1,147 @@
+-- D191 PA Code
+
+-- make tables
+-- transitional table
+CREATE TABLE monthly_renters (
+	rent_month TIMESTAMP,
+	renter VARCHAR(91),
+	rental INT	
+);
+-- Detail table
+CREATE TABLE rental_count (
+	rent_month TEXT,
+	renter VARCHAR(91),
+	rental_count INT
+);
+-- Summary table
+CREATE TABLE top_renters (
+	rent_month TEXT,
+	renter VARCHAR(91),
+	rental_count INT
+);
+
+-- Transform function
+
+CREATE OR REPLACE FUNCTION to_monthstamp(rental_date TIMESTAMP without time zone)
+RETURNS TIMESTAMP
+LANGUAGE plpgsql
+AS $$
+DECLARE monthstamp TIMESTAMP;
+BEGIN
+SELECT to_timestamp(to_char(rental_date, 'Month yyyy'), 'Month yyyy' ) INTO monthstamp;
+RETURN monthstamp;
+END; $$
+
+
+-- Populate tables
+
+INSERT INTO monthly_renters
+SELECT to_monthstamp(rental_date), concat(customer.first_name, ' ', customer.last_name), rental_id
+FROM rental
+LEFT JOIN customer
+	ON rental.customer_id = customer.customer_id
+ORDER BY concat(customer.first_name, ' ', customer.last_name), rental_date
+;
+
+INSERT INTO rental_count
+SELECT to_char(rent_month, 'fmMonth YYYY'), renter, COUNT(rental)
+FROM monthly_renters
+GROUP BY renter, rent_month
+ORDER BY rent_month, COUNT DESC
+;
+
+INSERT INTO top_renters
+SELECT T.*
+FROM rental_count T
+INNER JOIN (
+	SELECT rent_month, MAX(rental_count) AS most
+	FROM rental_count
+	GROUP BY rent_month) FILTER
+ON T.rent_month = FILTER.rent_month
+AND T.rental_count = most
+;
+
+
+
+-- create updating trigger
+
+CREATE or replace procedure new_rental()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+	TRUNCATE top_renters;
+	
+	INSERT INTO top_renters
+	SELECT T.*
+	FROM rental_count T
+	INNER JOIN (
+		SELECT rent_month, MAX(rental_count) AS most
+		FROM rental_count
+		GROUP BY rent_month) FILTER
+	ON T.rent_month = FILTER.rent_month
+	AND T.rental_count = most
+	;
+END; $$
+
+
+CREATE OR REPLACE FUNCTION rental_made()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+CALL new_rental();
+RETURN NEW;
+END; $$
+
+CREATE TRIGGER rental_made
+AFTER INSERT 
+ON rental_count
+FOR EACH STATEMENT
+EXECUTE PROCEDURE rental_made();
+
+-- create stored refresh procedure
+
+CREATE OR REPLACE PROCEDURE refresh_monthly_rental_count() --Should be run quarterly to ensure data stays fresh
+LANGUAGE plpgsql
+AS $$
+BEGIN
+	--Clear all 3 tables
+	TRUNCATE rental_count;
+	TRUNCATE monthly_renters;
+	TRUNCATE top_renters;
+	--Refill transitional table and detail table, summary table refills when detail table populates
+	INSERT INTO monthly_renters
+	SELECT to_monthstamp(rental_date), concat(customer.first_name, ' ', customer.last_name), rental_id
+	FROM rental
+	LEFT JOIN customer
+		ON rental.customer_id = customer.customer_id
+	ORDER BY concat(customer.first_name, ' ', customer.last_name), rental_date
+	;
+	
+	INSERT INTO rental_count
+	SELECT to_char(rent_month, 'fmMonth YYYY'), renter, COUNT(rental)
+	FROM monthly_renters
+	GROUP BY renter, rent_month
+	ORDER BY rent_month, COUNT DESC
+	;
+END; $$
+
+
+INSERT INTO rental_count VALUES('January 2022', 'Aaron Simpkiss', 5);
+
+SELECT * FROM rental_count;
+
+SELECT * FROM top_renters;
+
+CALL refresh_monthly_rental_count();
+
+--Clean-up commands
+TRUNCATE TABLE top_renters, monthly_renters, rental_count;
+
+DROP TRIGGER rental_made ON rental_count;
+DROP FUNCTION to_monthstamp;
+DROP FUNCTION rental_made;
+DROP PROCEDURE refresh_monthly_rental_count;
+DROP PROCEDURE new_rental;
+
+DROP TABLE top_renters, monthly_renters, rental_count;
